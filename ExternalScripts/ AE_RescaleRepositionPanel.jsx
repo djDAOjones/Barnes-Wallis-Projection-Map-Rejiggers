@@ -4,8 +4,7 @@ Dockable ScriptUI panel for After Effects
 - Select reference comp (with suffix)
 - Select layers (with group checkboxes for Section A–F)
 - Pick target layer
-- Choose Fit/Fill
-- Apply rescale/reposition
+- Apply rescale/reposition to fit bounds
 */
 
 function AE_RescaleRepositionPanel(thisObj) {
@@ -75,15 +74,6 @@ function AE_RescaleRepositionPanel(thisObj) {
         targetLayerInfo.comp = activeItem;
         targetName.text = targetLayerInfo.layer.name + ' (in ' + targetLayerInfo.comp.name + ')';
     }
-
-    // --- Fit/Fill Option ---
-    var fitFillGroup = win.add("group");
-    fitFillGroup.orientation = "row";
-    fitFillGroup.add("statictext", undefined, "Scale Mode:");
-    var fitRadio = fitFillGroup.add("radiobutton", undefined, "Fit");
-    var fillRadio = fitFillGroup.add("radiobutton", undefined, "Fill");
-    fitRadio.value = false;
-    fillRadio.value = true; // Default to Fill mode
 
     // --- Go Button ---
     var goBtn = win.add("button", undefined, "Go!");
@@ -242,17 +232,14 @@ function AE_RescaleRepositionPanel(thisObj) {
         var tAnchor = targetLayer.property("Anchor Point").valueAtTime(tTime, false);
         var tW = tRect.width, tH = tRect.height;
 
-        // --- Fit/Fill logic ---
-        var scaleMode = fitRadio.value ? "fit" : "fill";
+        // --- Simple Fit logic ---
         var scaleX = bounds.width / tW;
         var scaleY = bounds.height / tH;
-        var scale = (scaleMode === "fit") ? Math.min(scaleX, scaleY) : Math.max(scaleX, scaleY);
+        var scale = Math.min(scaleX, scaleY);
         var scaleArr = [scale*100, scale*100];
 
         // --- Centering logic ---
-        // Find center of target layer in its own space (before transform)
         var tCenter = [tRect.left + tW/2, tRect.top + tH/2];
-        // Position so that the center of the target aligns with the center of the bounds
         var newPos = [
             bounds.centerX - (tCenter[0] - tAnchor[0]) * scale,
             bounds.centerY - (tCenter[1] - tAnchor[1]) * scale
@@ -263,82 +250,8 @@ function AE_RescaleRepositionPanel(thisObj) {
         // --- Apply scale and position ---
         targetLayer.property("Scale").setValue(scaleArr);
         targetLayer.property("Position").setValue(newPos);
-
-        // --- Masking in Fill mode ---
-        if (scaleMode === "fill") {
-            try {
-                // --- NEW: Create matte solid above target layer ---
-                var matteName = "Reference Matte";
-                var matteSolid = targetComp.layers.addSolid([1,1,1], matteName, targetComp.width, targetComp.height, targetComp.pixelAspect);
-                matteSolid.moveBefore(targetLayer);
-                // Draw mask matching bounds in comp space
-                var mask = matteSolid.property("Masks").addProperty("Mask");
-                mask.name = "RefBoundsMask";
-                var refCorners = [
-                    [bounds.left, bounds.top],
-                    [bounds.right, bounds.top],
-                    [bounds.right, bounds.bottom],
-                    [bounds.left, bounds.bottom]
-                ];
-                var maskVerts = [];
-                for (var j = 0; j < refCorners.length; j++) {
-                    maskVerts.push(refCorners[j]);
-                }
-                var shape = new Shape();
-                shape.vertices = maskVerts;
-                shape.closed = true;
-                shape.inTangents = [];
-                shape.outTangents = [];
-                mask.property("maskShape").setValue(shape);
-                mask.property("maskMode").setValue(MaskMode.ADD);
-                // Set matteSolid as alpha matte for targetLayer
-                targetLayer.trackMatteType = TrackMatteType.ALPHA;
-                // (Optional: lock or shy the matte layer)
-                // matteSolid.locked = true;
-                // matteSolid.shy = true;
-            } catch (e) {
-                alert("Mask creation error: " + e.toString());
-            }
-            try {
-                // Remove existing mask named 'FillMask' if present
-                var maskProp = targetLayer.property("Masks");
-                for (var i = maskProp.numProperties; i >= 1; i--) {
-                    var m = maskProp.property(i);
-                    if (m.name === "FillMask") {
-                        maskProp.property(i).remove();
-                    }
-                }
-                // Create new mask
-                var mask = maskProp.addProperty("Mask");
-                mask.name = "FillMask";
-                // Reference bounds in comp space
-                var refCorners = [
-                    [bounds.left, bounds.top],
-                    [bounds.right, bounds.top],
-                    [bounds.right, bounds.bottom],
-                    [bounds.left, bounds.bottom]
-                ];
-                // Convert each corner from comp space to layer space
-                var layerVerts = [];
-                for (var j = 0; j < refCorners.length; j++) {
-                    var pt = targetLayer.fromComp(refCorners[j]);
-                    layerVerts.push(pt);
-                }
-                // --- Debug: Show mask vertices ---
-                alert("Mask vertices (layer space):\n" + JSON.stringify(layerVerts));
-                var shape = new Shape();
-                shape.vertices = layerVerts;
-                shape.closed = true;
-                shape.inTangents = [];
-                shape.outTangents = [];
-                mask.property("maskShape").setValue(shape);
-                mask.property("maskMode").setValue(MaskMode.ADD);
-            } catch (e) {
-                alert("Mask creation error: " + e.toString());
-            }
-        }
         app.endUndoGroup();
-    };
+    }
 
     // --- Utility: Get Combined Bounds ---
     function getCombinedBounds(layers, t) {
