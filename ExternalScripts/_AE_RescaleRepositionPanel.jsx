@@ -4,7 +4,8 @@ Dockable ScriptUI panel for After Effects
 - Select reference comp (with suffix)
 - Select layers (with group checkboxes for Section A–F)
 - Pick target layer
-- Apply rescale/reposition to fit bounds
+- Choose Fit/Fill
+- Apply rescale/reposition
 */
 
 function AE_RescaleRepositionPanel(thisObj) {
@@ -74,6 +75,15 @@ function AE_RescaleRepositionPanel(thisObj) {
         targetLayerInfo.comp = activeItem;
         targetName.text = targetLayerInfo.layer.name + ' (in ' + targetLayerInfo.comp.name + ')';
     }
+
+    // --- Fit/Fill Option ---
+    var fitFillGroup = win.add("group");
+    fitFillGroup.orientation = "row";
+    fitFillGroup.add("statictext", undefined, "Scale Mode:");
+    var fitRadio = fitFillGroup.add("radiobutton", undefined, "Fit");
+    var fillRadio = fitFillGroup.add("radiobutton", undefined, "Fill");
+    fitRadio.value = false;
+    fillRadio.value = true; // Default to Fill mode
 
     // --- Go Button ---
     var goBtn = win.add("button", undefined, "Go!");
@@ -162,96 +172,156 @@ function AE_RescaleRepositionPanel(thisObj) {
 
     // --- Main Logic ---
     goBtn.onClick = function() {
-        app.beginUndoGroup("Rescale & Reposition");
-        var comp = getSelectedComp();
-        if (!comp) { alert("No reference comp selected"); return; }
-        // Collect selected layers
-        var selectedLayers = [];
-        for (var i=0; i<layerCheckboxes.length; i++) {
-            if (layerCheckboxes[i].cb.value) selectedLayers.push(layerCheckboxes[i].layer);
-        }
-        if (selectedLayers.length === 0) { alert("No reference layers selected"); return; }
-        // --- Robust: Get union bounds in comp space using toComp ---
-        var time = comp.time;
-        function getLayerWorldCorners(layer, t) {
-            var rect = layer.sourceRectAtTime(t, false);
-            var anchor = layer.property("Anchor Point").valueAtTime(t, false);
-            var corners = [
-                [rect.left, rect.top],
-                [rect.left + rect.width, rect.top],
-                [rect.left + rect.width, rect.top + rect.height],
-                [rect.left, rect.top + rect.height]
+        try {
+            app.beginUndoGroup("Rescale & Reposition");
+            var comp = getSelectedComp();
+            if (!comp) { alert("No reference comp selected"); return; }
+
+            // Collect selected layers
+            var selectedLayers = [];
+            for (var i=0; i<layerCheckboxes.length; i++) {
+                if (layerCheckboxes[i].cb.value) selectedLayers.push(layerCheckboxes[i].layer);
+            }
+            if (selectedLayers.length === 0) { alert("No reference layers selected"); return; }
+
+            // --- Get union bounds in comp space robustly ---
+            var time = comp.time;
+            function getLayerWorldCorners(layer, t) {
+                if (typeof layer.toComp === "function") {
+                    var rect = layer.sourceRectAtTime(t, false);
+                    var anchor = layer.property("Anchor Point").valueAtTime(t, false);
+                    var corners = [
+                        [rect.left, rect.top],
+                        [rect.left + rect.width, rect.top],
+                        [rect.left + rect.width, rect.top + rect.height],
+                        [rect.left, rect.top + rect.height]
+                    ];
+                    var world = [];
+                    for (var i=0; i<corners.length; i++) {
+                        var pt = [corners[i][0] - anchor[0], corners[i][1] - anchor[1]];
+                        world.push(layer.toComp(pt));
+                    }
+                    return world;
+                } else {
+                    // Fallback for shape/text layers
+                    var rect = layer.sourceRectAtTime(t, false);
+                    var anchor = layer.property("Anchor Point").valueAtTime(t, false);
+                    var position = layer.property("Position").valueAtTime(t, false);
+                    function addPoints(a, b) { return [a[0]+b[0], a[1]+b[1]]; }
+                    return [
+                        addPoints([rect.left - anchor[0], rect.top - anchor[1]], position),
+                        addPoints([rect.left + rect.width - anchor[0], rect.top - anchor[1]], position),
+                        addPoints([rect.left + rect.width - anchor[0], rect.top + rect.height - anchor[1]], position),
+                        addPoints([rect.left - anchor[0], rect.top + rect.height - anchor[1]], position)
+                    ];
+                }
+            }
+            var allCorners = [];
+            for (var i=0; i<selectedLayers.length; i++) {
+                allCorners = allCorners.concat(getLayerWorldCorners(selectedLayers[i], time));
+            }
+            var minX = Number.POSITIVE_INFINITY, minY = Number.POSITIVE_INFINITY;
+            var maxX = Number.NEGATIVE_INFINITY, maxY = Number.NEGATIVE_INFINITY;
+            for (var i=0; i<allCorners.length; i++) {
+                minX = Math.min(minX, allCorners[i][0]);
+                minY = Math.min(minY, allCorners[i][1]);
+                maxX = Math.max(maxX, allCorners[i][0]);
+                maxY = Math.max(maxY, allCorners[i][1]);
+            }
+            var bounds = {
+                left: minX,
+                right: maxX,
+                top: minY,
+                bottom: maxY,
+                width: maxX - minX,
+                height: maxY - minY,
+                centerX: (minX + maxX) / 2,
+                centerY: (minY + maxY) / 2
+            };
+
+            // --- Target Layer ---
+            var targetLayer = targetLayerInfo.layer;
+            var targetComp = targetLayerInfo.comp;
+            if (!targetLayer || !targetComp) {
+                alert("No target layer selected. Please use the button to set it.");
+                app.endUndoGroup();
+                return;
+            }
+            var tTime = targetComp.time;
+            var tRect = targetLayer.sourceRectAtTime(tTime, false);
+            var tAnchor = targetLayer.property("Anchor Point").valueAtTime(tTime, false);
+            var tW = tRect.width, tH = tRect.height;
+
+            // --- Zero/NaN checks ---
+            if (!tW || !tH || isNaN(tW) || isNaN(tH) || !bounds.width || !bounds.height || isNaN(bounds.width) || isNaN(bounds.height)) {
+                alert("ERROR: Target layer or bounds width/height is zero, undefined, or NaN. Cannot scale.\ntW=" + tW + ", tH=" + tH + ", bounds.width=" + bounds.width + ", bounds.height=" + bounds.height);
+                app.endUndoGroup();
+                return;
+            }
+
+            // --- Fit/Fill logic ---
+            var scaleMode = fitRadio.value ? "fit" : "fill";
+            var scaleX = bounds.width / tW;
+            var scaleY = bounds.height / tH;
+            var scale = (scaleMode === "fit") ? Math.min(scaleX, scaleY) : Math.max(scaleX, scaleY);
+            var scaleArr = [scale*100, scale*100];
+
+            // --- Centering logic ---
+            var tCenter = [tRect.left + tW/2, tRect.top + tH/2];
+            var newPos = [
+                bounds.centerX - (tCenter[0] - tAnchor[0]) * scale,
+                bounds.centerY - (tCenter[1] - tAnchor[1]) * scale
             ];
-            var world = [];
-            for (var i=0; i<corners.length; i++) {
-                // Convert from layer space to comp space
-                var pt = [corners[i][0] - anchor[0], corners[i][1] - anchor[1]];
-                world.push(layer.toComp(pt));
+
+            // --- Apply scale and position ---
+            targetLayer.property("Scale").setValue(scaleArr);
+            targetLayer.property("Position").setValue(newPos);
+
+            // --- Matte creation and track matte assignment ---
+            // Create a solid as matte, sized and positioned to match bounds
+            var matteColor = [1,1,1];
+            var matteName = "Auto Matte";
+            var matteLayer = targetComp.layers.addSolid(matteColor, matteName, bounds.width, bounds.height, targetComp.pixelAspect);
+            // Position the matte center to bounds.centerX/Y
+            matteLayer.property("Position").setValue([bounds.centerX, bounds.centerY]);
+            // Move matte directly above the target layer
+            matteLayer.moveBefore(targetLayer);
+            // Set target layer to use Alpha Matte
+            targetLayer.trackMatteType = TrackMatteType.ALPHA;
+
+            // (Optional) Deselect the matte layer for cleanliness
+            matteLayer.selected = false;
+            targetLayer.selected = true;
+
+            // --- End of matte logic ---
+
+            // (If you want to keep the mask logic for other purposes, keep below)
+            var refCorners = [
+                [bounds.left, bounds.top],
+                [bounds.right, bounds.top],
+                [bounds.right, bounds.bottom],
+                [bounds.left, bounds.bottom]
+            ];
+            var maskVerts = [];
+            for (var j = 0; j < refCorners.length; j++) {
+                maskVerts.push(refCorners[j]);
             }
-            return world;
-        }
-        var allCorners = [];
-        for (var i=0; i<selectedLayers.length; i++) {
-            var lyr = selectedLayers[i];
-            alert("Processing reference layer: " + lyr.name + " (" + lyr.matchName + ")");
-            if (!(lyr instanceof AVLayer)) {
-                alert("Skipping non-AVLayer: " + lyr.name + " (" + lyr.matchName + ")");
-                continue;
-            }
-            var corners = getLayerWorldCorners(lyr, time);
-            allCorners = allCorners.concat(corners);
-        }
-        var minX = Number.POSITIVE_INFINITY, minY = Number.POSITIVE_INFINITY;
-        var maxX = Number.NEGATIVE_INFINITY, maxY = Number.NEGATIVE_INFINITY;
-        for (var i=0; i<allCorners.length; i++) {
-            minX = Math.min(minX, allCorners[i][0]);
-            minY = Math.min(minY, allCorners[i][1]);
-            maxX = Math.max(maxX, allCorners[i][0]);
-            maxY = Math.max(maxY, allCorners[i][1]);
-        }
-        var bounds = {
-            left: minX,
-            right: maxX,
-            top: minY,
-            bottom: maxY,
-            width: maxX - minX,
-            height: maxY - minY,
-            centerX: (minX + maxX) / 2,
-            centerY: (minY + maxY) / 2
-        };
+            var shape = new Shape();
+            shape.vertices = maskVerts;
+            shape.closed = true;
+            shape.inTangents = [];
+            shape.outTangents = [];
+            mask.property("maskShape").setValue(shape);
+            mask.property("maskMode").setValue(MaskMode.ADD);
+            targetLayer.trackMatteType = TrackMatteType.ALPHA;
+            */
 
-        // --- Target Layer ---
-        var targetLayer = targetLayerInfo.layer;
-        var targetComp = targetLayerInfo.comp;
-        if (!targetLayer || !targetComp) {
-            alert("No target layer selected. Please use the button to set it.");
-            return;
+            app.endUndoGroup();
+        } catch (e) {
+            alert("ERROR: " + e.toString());
+            app.endUndoGroup();
         }
-        var tTime = targetComp.time;
-        var tRect = targetLayer.sourceRectAtTime(tTime, false);
-        var tAnchor = targetLayer.property("Anchor Point").valueAtTime(tTime, false);
-        var tW = tRect.width, tH = tRect.height;
-
-        // --- Simple Fit logic ---
-        var scaleX = bounds.width / tW;
-        var scaleY = bounds.height / tH;
-        var scale = Math.min(scaleX, scaleY);
-        var scaleArr = [scale*100, scale*100];
-
-        // --- Centering logic ---
-        var tCenter = [tRect.left + tW/2, tRect.top + tH/2];
-        var newPos = [
-            bounds.centerX - (tCenter[0] - tAnchor[0]) * scale,
-            bounds.centerY - (tCenter[1] - tAnchor[1]) * scale
-        ];
-
-        // --- Show calculated scale and position for debugging ---
-        alert("Calculated scale: [" + scaleArr.join(", ") + "]\nCalculated position: [" + newPos.join(", ") + "]");
-        // --- Apply scale and position ---
-        targetLayer.property("Scale").setValue(scaleArr);
-        targetLayer.property("Position").setValue(newPos);
-        app.endUndoGroup();
-    }
+    };
 
     // --- Utility: Get Combined Bounds ---
     function getCombinedBounds(layers, t) {

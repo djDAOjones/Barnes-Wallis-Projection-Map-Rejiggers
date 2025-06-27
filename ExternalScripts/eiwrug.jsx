@@ -277,13 +277,28 @@ function AE_RescaleRepositionPanel(thisObj) {
             targetLayer.property("Scale").setValue(scaleArr);
             targetLayer.property("Position").setValue(newPos);
 
-            // --- Optional: Create matte/mask if desired ---
-            // Uncomment below to create a matte solid above the target layer
+            // --- Matte creation and track matte assignment ---
+            // Create a solid as matte, sized and positioned to match bounds
+            var matteColor = [1,1,1];
+            var matteName = "Auto Matte";
+            var matteWidth = Math.round(bounds.width);
+var matteHeight = Math.round(bounds.height);
+var matteLayer = targetComp.layers.addSolid(matteColor, matteName, matteWidth, matteHeight, targetComp.pixelAspect);
+            // Position the matte center to bounds.centerX/Y
+            matteLayer.property("Position").setValue([bounds.centerX, bounds.centerY]);
+            // Move matte directly above the target layer
+            matteLayer.moveBefore(targetLayer);
+            // Set target layer to use Alpha Matte
+            targetLayer.trackMatteType = TrackMatteType.ALPHA;
+
+            // (Optional) Deselect the matte layer for cleanliness
+            matteLayer.selected = false;
+            targetLayer.selected = true;
+
+            // --- End of matte logic ---
+
             /*
-            var matteSolid = targetComp.layers.addSolid([1,1,1], "Reference Matte", targetComp.width, targetComp.height, targetComp.pixelAspect);
-            matteSolid.moveBefore(targetLayer);
-            var mask = matteSolid.property("Masks").addProperty("Mask");
-            mask.name = "RefBoundsMask";
+            // (If you want to keep the mask logic for other purposes, keep below)
             var refCorners = [
                 [bounds.left, bounds.top],
                 [bounds.right, bounds.top],
